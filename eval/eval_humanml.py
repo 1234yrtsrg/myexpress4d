@@ -271,12 +271,15 @@ if __name__ == '__main__':
     else:
         raise ValueError()
 
+    if args.eval_rep_times > 0:
+        replication_times = args.eval_rep_times
+
 
     dist_util.setup_dist(args.device)
     logger.configure()
 
     logger.log("creating data loader...")
-    split = args.eval_split
+    split = getattr(args, 'eval_split', 'test')
     #TODO: change parameters
     gen_loader = get_dataset_loader(name=eval_dataset_name, batch_size=args.batch_size, num_frames=None, data_mode=args.data_mode, 
                                     max_len=args.maximum_frames, flip_face_on=False, fps=args.fps,

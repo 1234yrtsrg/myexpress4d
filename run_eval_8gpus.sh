@@ -1,124 +1,143 @@
-# ================= 配置区 =================
+#!/bin/bash
+
+# ================= Configuration =================
 MODEL_PATH="./output_model/mdm_mydata/model000450000.pt"
 DATASET="express4d"
 DATA_MODE="arkit"
 EVAL_MODE="wo_mm"
 EVAL_MODEL="tex_mot_match"
 RESULT_DIR="./eval_result"
-# ==========================================
+NUM_GPUS=8
+TOTAL_EVALS=20
+REPS_PER_JOB=1
+# =================================================
 
-# 1. 准备工作：创建结果文件夹
-mkdir -p $RESULT_DIR
-echo "📁 结果将保存在: $RESULT_DIR"
-echo "🚀 开始 8 卡满载并行评估..."
+mkdir -p "$RESULT_DIR"
+rm -f "${RESULT_DIR}"/eval_*_seed*.log
 
-# 2. 启动 8 个并行进程
-for i in {0..7}; do
-    SEED=$(( (i+1) * 1000 ))
-    LOG_NAME="eval_${EVAL_MODE}_seed${SEED}.log"
-    
-    echo "启动 GPU $i (Seed: $SEED, Log: $LOG_NAME)..."
-    
-    CUDA_VISIBLE_DEVICES=$i python -m eval.eval_humanml \
-        --model_path $MODEL_PATH \
-        --dataset $DATASET \
-        --data_mode $DATA_MODE \
+echo "Results will be saved to: $RESULT_DIR"
+echo "Launching ${TOTAL_EVALS} evaluation jobs across ${NUM_GPUS} GPUs..."
+
+running_jobs=0
+
+for ((job_idx=0; job_idx<${TOTAL_EVALS}; job_idx++)); do
+    gpu_id=$(( job_idx % NUM_GPUS ))
+    seed=$(( (job_idx + 1) * 1000 ))
+    log_name="eval_${EVAL_MODE}_seed${seed}.log"
+
+    echo "Launching job $((job_idx + 1))/${TOTAL_EVALS} on GPU ${gpu_id} (seed=${seed})..."
+
+    CUDA_VISIBLE_DEVICES=${gpu_id} python -m eval.eval_humanml \
+        --model_path "$MODEL_PATH" \
+        --dataset "$DATASET" \
+        --data_mode "$DATA_MODE" \
         --device 0 \
         --cond_mode text \
-        --eval_mode $EVAL_MODE \
-        --eval_model_name $EVAL_MODEL \
-        --seed $SEED > "${RESULT_DIR}/${LOG_NAME}" 2>&1 &
+        --eval_mode "$EVAL_MODE" \
+        --eval_model_name "$EVAL_MODEL" \
+        --eval_rep_times "$REPS_PER_JOB" \
+        --seed "$seed" > "${RESULT_DIR}/${log_name}" 2>&1 &
+
+    running_jobs=$((running_jobs + 1))
+
+    if [ "$running_jobs" -eq "$NUM_GPUS" ]; then
+        wait
+        running_jobs=0
+    fi
 done
 
-# 3. 等待所有后台进程结束
 wait
-echo "✅ 所有 GPU 评估任务已完成！"
+echo "All evaluation jobs have completed."
 
-# 4. 自动统计结果并高度还原官方格式
-echo "📊 正在聚合所有日志文件的结果..."
+echo "Aggregating results from all log files..."
 
 python3 -c '
-import sys
 import glob
-import re
+import math
 import os
+import re
+import sys
 import numpy as np
 
 result_dir = sys.argv[1]
 model_path = sys.argv[2]
-log_files = glob.glob(os.path.join(result_dir, "eval_*_seed*.log"))
+log_files = sorted(glob.glob(os.path.join(result_dir, "eval_*_seed*.log")))
 
 if not log_files:
-    print("❌ 错误：未找到日志文件！")
+    print("Error: no evaluation log files found.")
     sys.exit(1)
 
 metrics = {
-    "Matching Score": {"gt": [], "vald": []},
-    "FID": {"gt": [], "vald": []},
-    "Diversity": {"gt": [], "vald": []},
-    "MultiModality": {"gt": [], "vald": []}
+    "Matching Score": {"ground truth": [], "vald": []},
+    "FID": {"ground truth": [], "vald": []},
+    "Diversity": {"ground truth": [], "vald": []},
+    "MultiModality": {"ground truth": [], "vald": []},
 }
-r_prec = {"gt": [], "vald": []}
+r_precision = {"ground truth": [], "vald": []}
 
-# 逐个文件提取数据
-for f in log_files:
-    with open(f, "r") as file:
-        content = file.read()
-        
-        # 提取基础指标 (包含 Mean 和 CInterval)
-        def extract_basic(metric_name):
-            block = re.search(rf"========== {metric_name} Summary ==========(.*?)(==========|$)", content, re.S)
-            if block:
-                text = block.group(1)
-                gt = re.search(r"\[ground truth\] Mean: ([\d\.]+) CInterval: ([\d\.]+)", text)
-                if gt: metrics[metric_name]["gt"].append([float(gt.group(1)), float(gt.group(2))])
-                
-                vald = re.search(r"\[vald\] Mean: ([\d\.]+) CInterval: ([\d\.]+)", text)
-                if vald: metrics[metric_name]["vald"].append([float(vald.group(1)), float(vald.group(2))])
-                
-        extract_basic("Matching Score")
-        extract_basic("FID")
-        extract_basic("Diversity")
-        extract_basic("MultiModality")
-        
-        # 提取 R_precision (包含 top 1, 2, 3 的 Mean 和 CInt)
-        rp_block = re.search(r"========== R_precision Summary ==========(.*?)(==========|$)", content, re.S)
-        if rp_block:
-            text = rp_block.group(1)
-            gt = re.search(r"\[ground truth\]\(top 1\) Mean: ([\d\.]+) CInt: ([\d\.]+);\(top 2\) Mean: ([\d\.]+) CInt: ([\d\.]+);\(top 3\) Mean: ([\d\.]+) CInt: ([\d\.]+)", text)
-            if gt: r_prec["gt"].append([float(x) for x in gt.groups()])
-            
-            vald = re.search(r"\[vald\]\(top 1\) Mean: ([\d\.]+) CInt: ([\d\.]+);\(top 2\) Mean: ([\d\.]+) CInt: ([\d\.]+);\(top 3\) Mean: ([\d\.]+) CInt: ([\d\.]+)", text)
-            if vald: r_prec["vald"].append([float(x) for x in vald.groups()])
+def parse_metric_mean(block_text, label):
+    match = re.search(rf"\\[{re.escape(label)}\\] Mean: ([\\d\\.]+) CInterval: ([\\d\\.]+)", block_text)
+    if match:
+        return float(match.group(1))
+    return None
 
-print(f"\n==================== 模型 {os.path.basename(model_path)} 全局平均结果 ({len(log_files)}个进程联合求均) ====================")
+for log_file in log_files:
+    with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
+        content = f.read()
 
-# 格式化输出基础指标
-def print_basic(metric_name):
-    gt = np.mean(metrics[metric_name]["gt"], axis=0) if metrics[metric_name]["gt"] else None
-    vald = np.mean(metrics[metric_name]["vald"], axis=0) if metrics[metric_name]["vald"] else None
-    
-    if gt is not None or vald is not None:
-        print(f"========== {metric_name} Summary ==========")
-        if gt is not None: 
-            print(f"---> [ground truth] Mean: {gt[0]:.4f} CInterval: {gt[1]:.4f}")
-        if vald is not None: 
-            print(f"---> [vald] Mean: {vald[0]:.4f} CInterval: {vald[1]:.4f}")
+    for metric_name in metrics:
+        block = re.search(rf"========== {re.escape(metric_name)} Summary ==========(.*?)(==========|$)", content, re.S)
+        if not block:
+            continue
+        block_text = block.group(1)
+        for label in ("ground truth", "vald"):
+            value = parse_metric_mean(block_text, label)
+            if value is not None:
+                metrics[metric_name][label].append(value)
 
-print_basic("Matching Score")
+    rp_block = re.search(r"========== R_precision Summary ==========(.*?)(==========|$)", content, re.S)
+    if rp_block:
+        block_text = rp_block.group(1)
+        for label in ("ground truth", "vald"):
+            match = re.search(
+                rf"\\[{re.escape(label)}\\]\\(top 1\\) Mean: ([\\d\\.]+) CInt: ([\\d\\.]+);"
+                rf"\\(top 2\\) Mean: ([\\d\\.]+) CInt: ([\\d\\.]+);"
+                rf"\\(top 3\\) Mean: ([\\d\\.]+) CInt: ([\\d\\.]+);",
+                block_text
+            )
+            if match:
+                r_precision[label].append([float(match.group(1)), float(match.group(3)), float(match.group(5))])
 
-# 格式化输出 R_precision
-gt_rp = np.mean(r_prec["gt"], axis=0) if r_prec["gt"] else None
-vald_rp = np.mean(r_prec["vald"], axis=0) if r_prec["vald"] else None
-if gt_rp is not None or vald_rp is not None:
-    print("========== R_precision Summary ==========")
-    if gt_rp is not None: 
-        print(f"---> [ground truth](top 1) Mean: {gt_rp[0]:.4f} CInt: {gt_rp[1]:.4f};(top 2) Mean: {gt_rp[2]:.4f} CInt: {gt_rp[3]:.4f};(top 3) Mean: {gt_rp[4]:.4f} CInt: {gt_rp[5]:.4f};")
-    if vald_rp is not None: 
-        print(f"---> [vald](top 1) Mean: {vald_rp[0]:.4f} CInt: {vald_rp[1]:.4f};(top 2) Mean: {vald_rp[2]:.4f} CInt: {vald_rp[3]:.4f};(top 3) Mean: {vald_rp[4]:.4f} CInt: {vald_rp[5]:.4f};")
+def summarize(values):
+    if not values:
+        return None, None
+    arr = np.array(values, dtype=float)
+    mean = arr.mean(axis=0)
+    std = arr.std(axis=0)
+    cint = 1.96 * std / math.sqrt(len(arr))
+    return mean, cint
 
-print_basic("FID")
-print_basic("Diversity")
-print_basic("MultiModality")
+print(f"\n==================== Aggregated results for {os.path.basename(model_path)} from {len(log_files)} jobs ====================")
+
+for metric_name in ("Matching Score", "R_precision", "FID", "Diversity", "MultiModality"):
+    print(f"========== {metric_name} Summary ==========")
+    if metric_name == "R_precision":
+        for label in ("ground truth", "vald"):
+            mean, cint = summarize(r_precision[label])
+            if mean is not None:
+                print(
+                    f"---> [{label}](top 1) Mean: {mean[0]:.4f} CInt: {cint[0]:.4f};"
+                    f"(top 2) Mean: {mean[1]:.4f} CInt: {cint[1]:.4f};"
+                    f"(top 3) Mean: {mean[2]:.4f} CInt: {cint[2]:.4f};"
+                )
+    else:
+        for label in ("ground truth", "vald"):
+            mean, cint = summarize(metrics[metric_name][label])
+            if mean is not None:
+                if np.isscalar(mean):
+                    print(f"---> [{label}] Mean: {mean:.4f} CInterval: {cint:.4f}")
+                else:
+                    print(f"---> [{label}] Mean: {mean[0]:.4f} CInterval: {cint[0]:.4f}")
+
 print("=======================================================================================================================")
 ' "$RESULT_DIR" "$MODEL_PATH"
