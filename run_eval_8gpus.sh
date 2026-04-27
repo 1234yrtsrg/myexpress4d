@@ -1,5 +1,5 @@
 # ================= 配置区 =================
-MODEL_PATH="./output_model/mdm_mydata/model000250000.pt"
+MODEL_PATH="./output_model/mdm_mydata/model000450000.pt"
 DATASET="express4d"
 DATA_MODE="arkit"
 EVAL_MODE="wo_mm"
