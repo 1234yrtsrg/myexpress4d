@@ -94,6 +94,7 @@ for ((job_idx=0; job_idx<${TOTAL_EVALS}; job_idx++)); do
         --cond_mode text \
         --eval_mode "$EVAL_MODE" \
         --eval_model_name "$EVAL_MODEL" \
+        --eval_dataset_override express4d \
         --eval_rep_times "$REPS_PER_JOB" \
         --seed "$seed" > "$log_path" 2>&1 &
 
@@ -143,38 +144,38 @@ metrics = {
 }
 r_precision = {"ground truth": [], "vald": []}
 
-def parse_metric_mean(block_text, label):
-    match = re.search(rf"\\[{re.escape(label)}\\] Mean: ([\\d\\.]+) CInterval: ([\\d\\.]+)", block_text)
-    if match:
-        return float(match.group(1))
-    return None
-
 for log_file in log_files:
     with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
-        content = f.read()
+        lines = f.readlines()
 
-    for metric_name in metrics:
-        block = re.search(rf"========== {re.escape(metric_name)} Summary ==========(.*?)(==========|$)", content, re.S)
-        if not block:
+    current_summary = None
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
             continue
-        block_text = block.group(1)
-        for label in ("ground truth", "vald"):
-            value = parse_metric_mean(block_text, label)
-            if value is not None:
-                metrics[metric_name][label].append(value)
 
-    rp_block = re.search(r"========== R_precision Summary ==========(.*?)(==========|$)", content, re.S)
-    if rp_block:
-        block_text = rp_block.group(1)
-        for label in ("ground truth", "vald"):
-            match = re.search(
-                rf"\\[{re.escape(label)}\\]\\(top 1\\) Mean: ([\\d\\.]+) CInt: ([\\d\\.]+);"
-                rf"\\(top 2\\) Mean: ([\\d\\.]+) CInt: ([\\d\\.]+);"
-                rf"\\(top 3\\) Mean: ([\\d\\.]+) CInt: ([\\d\\.]+);",
-                block_text
+        summary_match = re.match(r"========== (.+) Summary ==========", line)
+        if summary_match:
+            current_summary = summary_match.group(1)
+            continue
+
+        if current_summary in metrics:
+            metric_match = re.match(r"---> \[(ground truth|vald)\] Mean: ([0-9eE+\-.]+) CInterval: ([0-9eE+\-.]+)", line)
+            if metric_match:
+                label = metric_match.group(1)
+                metrics[current_summary][label].append(float(metric_match.group(2)))
+                continue
+
+        if current_summary == "R_precision":
+            rp_match = re.match(
+                r"---> \[(ground truth|vald)\]\(top 1\) Mean: ([0-9eE+\-.]+) CInt: ([0-9eE+\-.]+);"
+                r"\(top 2\) Mean: ([0-9eE+\-.]+) CInt: ([0-9eE+\-.]+);"
+                r"\(top 3\) Mean: ([0-9eE+\-.]+) CInt: ([0-9eE+\-.]+);",
+                line,
             )
-            if match:
-                r_precision[label].append([float(match.group(1)), float(match.group(3)), float(match.group(5))])
+            if rp_match:
+                label = rp_match.group(1)
+                r_precision[label].append([float(rp_match.group(2)), float(rp_match.group(4)), float(rp_match.group(6))])
 
 def summarize(values):
     if not values:
