@@ -24,7 +24,7 @@ def evaluation_vae_parser():
     add_classifier_options(parser)
 
     group = parser.add_argument_group("vqvae")
-    group.add_argument("--vq_model_root", default="/output_model/vq-vae", type=str,
+    group.add_argument("--vq_model_root", default="./output_model/vq-vae", type=str,
                        help="Directory containing rvq_Express4D, t2m_Express4D, res_Express4D.")
     group.add_argument("--vq_code_root", default="./external/mymomask", type=str,
                        help="External VQ-VAE/MoMask source root.")

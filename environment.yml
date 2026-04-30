@@ -44,6 +44,7 @@ dependencies:
       - cycler==0.12.1
       - cymem==2.0.11
       - decorator==4.4.2
+      - einops==0.8.1
       - filelock==3.13.1
       - fonttools==4.60.1
       - fsspec==2024.6.1

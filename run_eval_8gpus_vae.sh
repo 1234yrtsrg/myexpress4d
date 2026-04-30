@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ================= Configuration =================
-VQ_MODEL_ROOT="/output_model/vq-vae"
+VQ_MODEL_ROOT="./output_model/vq-vae"
 VQ_CODE_ROOT="./external/mymomask"
 DATASET="express4d"
 DATA_MODE="arkit"
@@ -24,6 +24,22 @@ TOPK_FILTER_THRES=0.9
 
 mkdir -p "$RESULT_DIR"
 rm -f "${RESULT_DIR}"/eval_vae_*_seed*.log
+
+python - <<'PY'
+missing = []
+for module_name in ("einops", "clip"):
+    try:
+        __import__(module_name)
+    except ImportError:
+        missing.append(module_name)
+
+if missing:
+    print("Error: missing Python modules required by external/mymomask: " + ", ".join(missing))
+    print("Install them in the active Express4D environment, for example:")
+    print("  pip install einops==0.8.1")
+    print("  pip install git+https://github.com/openai/CLIP.git")
+    raise SystemExit(1)
+PY
 
 watch_job_log() {
     local log_path="$1"

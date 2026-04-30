@@ -16,7 +16,19 @@ def collate_fn(batch):
 
 
 def _as_path(path):
-    return os.path.abspath(os.path.expanduser(path))
+    expanded_path = os.path.expanduser(path)
+    if os.path.exists(expanded_path):
+        return os.path.abspath(expanded_path)
+
+    # Some launch scripts run from the repo root while configs are written as
+    # absolute-looking paths such as /output_model/vq-vae. Fall back to the
+    # same path relative to the current workspace when that local directory exists.
+    if os.path.isabs(expanded_path):
+        relative_candidate = os.path.abspath(expanded_path.lstrip(os.sep))
+        if os.path.exists(relative_candidate):
+            return relative_candidate
+
+    return os.path.abspath(expanded_path)
 
 
 def _strip_state_dict_prefixes(state_dict):
@@ -142,6 +154,14 @@ class ExternalMoMaskGenerator:
             self.MaskTransformer = transformer_module.MaskTransformer
             self.ResidualTransformer = getattr(transformer_module, "ResidualTransformer", None)
         except Exception as exc:
+            missing_module = exc.name if isinstance(exc, ModuleNotFoundError) else None
+            if missing_module:
+                raise ImportError(
+                    f"Could not import external VQ-VAE/MoMask dependency [{missing_module}]. "
+                    "Install the missing package in the active environment. Common requirements are: "
+                    "pip install einops==0.8.1 and "
+                    "pip install git+https://github.com/openai/CLIP.git"
+                ) from exc
             raise ImportError(
                 "Could not import the external VQ-VAE/MoMask model code. Expected modules like "
                 "utils.get_opt, models.vq.model, and models.mask_transformer.transformer under "
